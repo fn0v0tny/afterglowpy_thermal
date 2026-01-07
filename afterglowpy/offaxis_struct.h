@@ -99,6 +99,10 @@ struct fluxParams
     double epsilon_B;
     double ksi_N;
 
+    // Maxwellian electron component parameters
+    double frac_maxwellian;  // Energy fraction in thermal component (0 to 1)
+    double gamma_th;         // Thermal Lorentz factor
+
     double theta_h;
     double E_iso_core;
     double theta_core;
@@ -221,6 +225,7 @@ double phi_integrand(double a_phi, void* params); // outer integral
 double emissivity(double nu, double R, double mu, double te,
                     double u, double us, double rho0, double Msw, double p,
                     double epse, double epsB, double ksiN,
+                    double frac_maxwellian, double gamma_th,
                     int specType); //emissivity of
                                                              // a zone.
 
@@ -309,14 +314,16 @@ void setup_fluxParams(struct fluxParams *pars,
                     double theta_obs,
                     double E_iso_core, double theta_core, double theta_wing,
                     double b,
-                    double L0_inj, double q_inj, double t0_inj, double ts_inj, 
+                    double L0_inj, double q_inj, double t0_inj, double ts_inj,
                     double n_0,
                     double p,
                     double epsilon_E,
-                    double epsilon_B, 
+                    double epsilon_B,
                     double ksi_N,
+                    double frac_maxwellian,
+                    double gamma_th,
                     double g0,
-                    int envType, double R0_env, double k_env, double rho1_env, 
+                    int envType, double R0_env, double k_env, double rho1_env,
                     double E_core_global,
                     double theta_core_global,
                     double ta, double tb,

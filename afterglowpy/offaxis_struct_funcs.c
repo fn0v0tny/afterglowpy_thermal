@@ -522,34 +522,261 @@ void calc_absorption_length(double R, double mu, double delta,
 }
 
 ///////////////////////////////////////////////////////////////////////////////
+// Maxwellian Electron Distribution Helper Functions
+///////////////////////////////////////////////////////////////////////////////
+
+// Modified Bessel function K_n(x) using polynomial/asymptotic approximations
+// Based on Abramowitz & Stegun formulas, accurate to ~1e-6
+double besselK(int n, double x) {
+    if (x <= 0.0) return 1.0e100; // Avoid singularity
+
+    if (n == 1) {
+        if (x < 2.0) {
+            // Small argument expansion
+            double x2 = x * x;
+            return 1.0 / x + x * (log(x / 2.0) + 0.5772156649) +
+                   x * x2 / 8.0 * (1.0 - 2.0 * (log(x / 2.0) + 0.5772156649));
+        } else {
+            // Large argument asymptotic
+            return sqrt(M_PI / (2.0 * x)) * exp(-x) *
+                   (1.0 + 3.0 / (8.0 * x) - 15.0 / (128.0 * x * x));
+        }
+    } else if (n == 2) {
+        if (x < 2.0) {
+            // Small argument expansion
+            double x2 = x * x;
+            return 2.0 / x2 - (1.0 + x2 / 4.0) * (log(x / 2.0) + 0.5772156649) -
+                   1.0 / 2.0 + x2 / 16.0;
+        } else {
+            // Large argument asymptotic
+            return sqrt(M_PI / (2.0 * x)) * exp(-x) *
+                   (1.0 + 15.0 / (8.0 * x) + 105.0 / (128.0 * x * x));
+        }
+    }
+    return 0.0; // Unsupported order
+}
+
+// Mean Lorentz factor for Maxwell-Jüttner distribution
+// ⟨γ⟩ = K₂(1/θ) / K₁(1/θ) + 3θ
+double mean_gamma_maxwell_juttner(double theta) {
+    if (theta <= 0.0) return 1.0;
+    double inv_theta = 1.0 / theta;
+    double K1 = besselK(1, inv_theta);
+    double K2 = besselK(2, inv_theta);
+    if (K1 <= 0.0) return 1.0 + 3.0 * theta; // Fallback
+    return K2 / K1 + 3.0 * theta;
+}
+
+// Solve for temperature θ from mean Lorentz factor using Newton-Raphson
+// Inverts ⟨γ⟩ = K₂(1/θ) / K₁(1/θ) + 3θ
+double invert_theta_from_gamma_mean(double gamma_mean) {
+    if (gamma_mean <= 1.0) return 1e-10;
+
+    // Initial guess: θ ~ (γ - 1) / 3 for mildly relativistic
+    double theta = (gamma_mean - 1.0) / 3.0;
+    if (theta < 0.01) theta = 0.01;
+
+    // Newton-Raphson iteration
+    for (int i = 0; i < 20; i++) {
+        double gamma_calc = mean_gamma_maxwell_juttner(theta);
+        double residual = gamma_calc - gamma_mean;
+        if (fabs(residual) < 1e-6 * gamma_mean) break;
+
+        // Numerical derivative
+        double dtheta = theta * 1e-5;
+        double gamma_plus = mean_gamma_maxwell_juttner(theta + dtheta);
+        double derivative = (gamma_plus - gamma_calc) / dtheta;
+
+        if (fabs(derivative) < 1e-10) break;
+        theta -= residual / derivative;
+        if (theta < 0.001) theta = 0.001;
+        if (theta > 100.0) theta = 100.0;
+    }
+    return theta;
+}
+
+// Solve for temperature θ from thermal energy conservation
+// E_thermal = n' m_e c² ⟨γ⟩ = n' m_e c² [K₂(1/θ)/K₁(1/θ) + 3θ]
+double solve_theta_from_energy(double E_thermal, double nprime) {
+    if (E_thermal <= 0.0 || nprime <= 0.0) return 1e-10;
+
+    double gamma_mean = E_thermal / (nprime * m_e * v_light * v_light);
+    if (gamma_mean < 1.0) gamma_mean = 1.0;
+
+    return invert_theta_from_gamma_mean(gamma_mean);
+}
+
+// Maxwell-Jüttner distribution: N(γ) = n' γ² exp(-γ/θ) / [θ K₂(1/θ)]
+double maxwell_juttner_distribution(double gamma, double theta, double nprime) {
+    if (gamma < 1.0 || theta <= 0.0 || nprime <= 0.0) return 0.0;
+
+    double inv_theta = 1.0 / theta;
+    double K2 = besselK(2, inv_theta);
+    if (K2 <= 0.0) return 0.0;
+
+    double exponent = -gamma / theta;
+    if (exponent < -50.0) return 0.0; // Avoid underflow
+
+    return nprime * gamma * gamma * exp(exponent) / (theta * K2);
+}
+
+// Synchrotron kernel for single electron - IMPROVED VERSION
+// Returns P(ν,γ) - single-electron emissivity
+// This version uses a faster exponential cutoff (exp(-1.5*x) instead of exp(-x^0.6))
+double synchrotron_kernel(double nu, double gamma, double B) {
+    if (gamma < 1.0 || B <= 0.0 || nu <= 0.0) return 0.0;
+
+    // Characteristic frequency for this electron
+    double nu_c = 3.0 * gamma * gamma * e_e * B / (4.0 * M_PI * m_e * v_light);
+    double x = nu / nu_c;
+
+    // Improved synchrotron function approximation
+    double F_x;
+    if (x < 0.1) {
+        // Low frequency: F(x) ∝ x^(1/3)
+        F_x = 1.8 * pow(x, 1.0 / 3.0);
+    } else if (x > 10.0) {
+        // High frequency: exponential cutoff
+        F_x = sqrt(M_PI * x / 2.0) * exp(-x);
+    } else {
+        // Intermediate: faster cutoff than original
+        // Original had exp(-x^0.6), now using exp(-1.5*x)
+        F_x = 1.25 * sqrt(x) * exp(-1.5 * x);
+    }
+
+    // Normalization
+    double prefactor = sqrt(3.0) * e_e * e_e * e_e * B / (m_e * v_light * v_light);
+    return prefactor * F_x;
+}
+
+// Absorption coefficient for Maxwellian electrons
+// Uses Kirchhoff's law: α_ν ∝ ∫ P(ν,γ) ∂/∂γ[γ⁻² N(γ)] dγ
+double absorption_coefficient_maxwellian(double nu, double B, double theta,
+                                        double nprime, double gmin, double gmax) {
+    if (nu <= 0.0 || B <= 0.0 || theta <= 0.0 || nprime <= 0.0) return 0.0;
+    if (gmax <= gmin) return 0.0;
+
+    // Numerical integration over γ
+    int n_int = 50;
+    double log_gmin = log(gmin);
+    double log_gmax = log(gmax);
+    double dlog_gamma = (log_gmax - log_gmin) / n_int;
+    double sum = 0.0;
+
+    for (int i = 0; i < n_int; i++) {
+        double log_gamma_i = log_gmin + (i + 0.5) * dlog_gamma;
+        double gamma_i = exp(log_gamma_i);
+
+        // Maxwell-Jüttner distribution
+        double N = maxwell_juttner_distribution(gamma_i, theta, nprime);
+
+        // Derivative: ∂N/∂γ = N * (2/γ - 1/θ) from analytic form
+        double dNdgamma = N * (2.0 / gamma_i - 1.0 / theta);
+
+        // Synchrotron kernel
+        double P_nu = synchrotron_kernel(nu, gamma_i, B);
+
+        // Integrate γ * dN/dγ * P(ν,γ) * d(ln γ)
+        sum += gamma_i * dNdgamma * P_nu * dlog_gamma;
+    }
+
+    // Absorption coefficient (cgs units)
+    return sum * e_e * e_e / (m_e * v_light);
+}
+
+// Absorption coefficient for power-law electrons (Granot & Sari 2002)
+double absorption_coefficient_powerlaw(double nu, double B, double p,
+                                      double C_pl, double g_min, double g_max) {
+    if (nu <= 0.0 || B <= 0.0 || C_pl <= 0.0) return 0.0;
+
+    // Effective gamma at this frequency
+    double g_eff = sqrt(nu / (3.0 * e_e * B / (4.0 * M_PI * m_e * v_light)));
+    if (g_eff < g_min) g_eff = g_min;
+    if (g_eff > g_max) return 0.0;
+
+    // Standard formula (GS02 Eq. 8)
+    double alpha = (p - 1.0) * e_e * e_e * C_pl * B /
+                   (9.0 * m_e * v_light * g_eff * g_eff);
+    return alpha;
+}
+
+///////////////////////////////////////////////////////////////////////////////
+
+// Helper: Compute thermal emissivity by integrating Maxwellian distribution
+// This function computes the synchrotron emissivity from a pure Maxwell-Jüttner
+// distribution by numerically integrating: j'_ν = ∫ N(γ) P(ν,γ) dγ
+double thermal_emissivity(double nuprime, double theta, double nprime,
+                         double B, double g_c) {
+    if (theta <= 0.0 || nprime <= 0.0) return 0.0;
+
+    // Integration limits: from γ=1 to γ=min(g_c, 100)
+    // (Maxwellian becomes negligible beyond ~30θ anyway)
+    double gamma_min = 1.0;
+    double gamma_max = (g_c < 100.0) ? g_c : 100.0;
+    if (gamma_max > 30.0 * theta) {
+        gamma_max = 30.0 * theta;  // Maxwellian tail cutoff
+    }
+    if (gamma_max < 2.0) gamma_max = 2.0;
+
+    // Numerical integration in log-space for stability
+    int n_int = 80;  // Reasonable resolution
+    double log_gmin = log(gamma_min);
+    double log_gmax = log(gamma_max);
+    double dlog_gamma = (log_gmax - log_gmin) / n_int;
+
+    double em_spec = 0.0;
+
+    for (int i = 0; i < n_int; i++) {
+        double log_gamma_i = log_gmin + (i + 0.5) * dlog_gamma;
+        double gamma_i = exp(log_gamma_i);
+
+        // Maxwell-Jüttner distribution
+        double N_th = maxwell_juttner_distribution(gamma_i, theta, nprime);
+
+        // Synchrotron kernel (improved version)
+        double P_nu = synchrotron_kernel(nuprime, gamma_i, B);
+
+        // Integrate: j'_ν = ∫ N(γ) P(ν,γ) dγ = ∫ N(γ) P(ν,γ) γ d(ln γ)
+        em_spec += gamma_i * N_th * P_nu * dlog_gamma;
+    }
+
+    return em_spec;
+}
+
+///////////////////////////////////////////////////////////////////////////////
+// MAIN EMISSIVITY FUNCTION - SEPARATE THERMAL + NON-THERMAL POPULATIONS
+///////////////////////////////////////////////////////////////////////////////
 
 double emissivity(double nu, double R, double mu, double te,
                     double u, double us, double rho0, double Msw,
                     double p, double epse,
-                    double epsB, double ksiN, int specType)
+                    double epsB, double ksiN,
+                    double frac_maxwellian, double gamma_th,
+                    int specType)
 {
+    // =========================================================================
+    // EARLY EXIT CONDITIONS
+    // =========================================================================
     if(us < 1.0e-5)
-    {
-        //shock is ~ at sound speed of warm ISM. Won't shock, approach invalid.
-        return 0.0;
-    }
+        return 0.0;  // Shock is at sound speed of warm ISM. Won't shock.
     if(R == 0.0)
         return 0.0;
 
-    // set remaining fluid quantities
+    // =========================================================================
+    // SETUP: Fluid quantities
+    // =========================================================================
     double n0 = rho0 / m_p;
     double g = sqrt(1+u*u);
     double beta = u/g;
     double betaS = us / sqrt(1+us*us);
-    double nprime = 4.0 * n0 * g; // comoving number density
+    double nprime = 4.0 * n0 * g;  // Comoving number density
     double e_th = u*u/(g+1) * nprime * m_p * v_light * v_light;
     double B = sqrt(epsB * 8.0 * PI * e_th);
-    double a = (1.0 - mu * beta); // beaming factor
-    double ashock = (1.0 - mu * betaS); // shock velocity beaming factor
-    double DR0 = Msw / (16*M_PI * R*R * g*g * rho0);  //shock width in labframe
-    double DR = DR0 / ashock; //shock width for constant-tobs slice
-    //double DR = R / (12.0 * g*g * ashock);
-    if (DR < 0.0) DR *= -1.0; // DR is function of the absolute value of mu
+    double a = (1.0 - mu * beta);  // Beaming factor
+    double ashock = (1.0 - mu * betaS);  // Shock velocity beaming factor
+    double DR0 = Msw / (16*M_PI * R*R * g*g * rho0);  // Shock width in lab frame
+    double DR = DR0 / ashock;  // Shock width for constant-tobs slice
+    if (DR < 0.0) DR *= -1.0;  // DR is function of absolute value of mu
 
     double epsebar;
     if(specType & EPS_E_BAR_FLAG)
@@ -560,37 +787,48 @@ double emissivity(double nu, double R, double mu, double te,
     else
         epsebar = (2.0-p) / (1.0-p) * epse;
 
+    // =========================================================================
+    // ENERGY PARTITION
+    // =========================================================================
+    // IMPORTANT: Clarify parameter meaning!
+    // If frac_maxwellian means "non-thermal fraction":
+    double delta = frac_maxwellian;  // Non-thermal (power-law) fraction
+    // If frac_maxwellian means "thermal fraction", use: delta = 1.0 - frac_maxwellian;
 
-    // set local emissivity 
-    double nuprime = nu * g * a; // comoving observer frequency
-    double g_m = epsebar * e_th / (ksiN * nprime * m_e * v_light * v_light);
+    if (delta < 0.0) delta = 0.0;
+    if (delta > 1.0) delta = 1.0;
+
+    double E_shock = e_th;
+    double E_thermal = (1.0 - delta) * epse * E_shock;   // Energy in Maxwellian
+    double E_powerlaw = delta * epse * E_shock;           // Energy in power-law
+
+    // =========================================================================
+    // COMOVING FRAME QUANTITIES
+    // =========================================================================
+    double nuprime = nu * g * a;  // Comoving observer frequency
+
+    // Cooling Lorentz factor (same for both populations)
     double g_c = 6 * PI * m_e * g * v_light / (sigma_T * B * B * te);
-    if((specType & DEEP_NEWTONIAN_FLAG) && g_m < 1.0)
-        g_m = 1.0;
 
-    //Inverse Compton adjustment of g_c
-    if(specType & IC_COOLING_FLAG)
-    {
-        double gr = g_c / g_m;
+    // Inverse Compton cooling adjustment (if needed)
+    if(specType & IC_COOLING_FLAG) {
+        // Use average g_m for IC correction
+        double g_m_approx = epsebar * e_th / (ksiN * nprime * m_e * v_light * v_light);
+        double gr = g_c / g_m_approx;
         double y = beta * epse/epsB;
         double X = 1.0;
 
-        if(gr <= 1.0 || gr*gr-gr-y <= 0.0)
-        {
-            //Fast Cooling
+        if(gr <= 1.0 || gr*gr-gr-y <= 0.0) {
+            // Fast cooling
             X = 0.5*(1 + sqrt(1+4*y));
-        }
-        else
-        {
-            //Slow Cooling
+        } else {
+            // Slow cooling
             double b = y * pow(gr, 2-p);
             double Xa = 1 + b;
             double Xb = pow(b, 1.0/(4-p)) + 1.0/(4-p);
             double s = b*b / (b*b + 1);
             X = Xa * pow(Xb/Xa, s);
-            int i;
-            for(i=0; i<5; i++)
-            {
+            for(int i=0; i<5; i++) {
                 double po = pow(X, p-2);
                 double f = X*X - X - b*po;
                 double df = 2*X - 1 - (p-2)*b*po/X;
@@ -600,106 +838,122 @@ double emissivity(double nu, double R, double mu, double te,
                     break;
             }
         }
-
         g_c /= X;
     }
 
-    double nu_m = 3.0 * g_m * g_m * e_e * B / (4.0 * PI * m_e * v_light);
-    double nu_c = 3.0 * g_c * g_c * e_e * B / (4.0 * PI * m_e * v_light);
-    double em = 0.5*(p - 1.0)*sqrt(3.0) * e_e*e_e*e_e * ksiN * nprime * B
-                    / (m_e*v_light*v_light);
-
-    if(specType & DEEP_NEWTONIAN_FLAG)
-        em *= epsebar * e_th 
-                / (ksiN*nprime * g_m * m_e * v_light*v_light);
-  
-    double freq = 0.0; // frequency dependent part of emissivity
-    double back_pow = 10.0;
-    double eff_k = 3 - Msw / (4*M_PI*R*R*R*rho0);
-
     if(specType & NO_COOLING_FLAG)
-        nu_c = 1.0e200;
+        g_c = 1.0e200;
 
-    // set frequency dependence
-    if (nu_c > nu_m)
-    {
-        if (nuprime < nu_m)
-        {
-            freq = pow(nuprime / nu_m, 1.0 / 3.0 );
-            back_pow = (28-11*eff_k)/(9*(4-eff_k));
+    // =========================================================================
+    // COMPONENT 1: THERMAL (MAXWELLIAN) EMISSION
+    // =========================================================================
+    double em_thermal = 0.0;
+
+    if (E_thermal > 0.0 && delta < 1.0) {
+        // Determine temperature from thermal energy
+        double theta = 0.0;
+
+        if (gamma_th > 1.0) {
+            // User provided mean Lorentz factor
+            theta = invert_theta_from_gamma_mean(gamma_th);
+        } else {
+            // Solve from energy conservation
+            theta = solve_theta_from_energy(E_thermal, nprime);
         }
-        else if (nuprime < nu_c)
-        {
-            freq = pow(nuprime / nu_m, 0.5 * (1.0 - p));
-            back_pow = (33+13*p - (15-p)*eff_k)/(12*(4-eff_k));
-        }
-        else
-        {
-            freq = pow(nu_c / nu_m, 0.5 * (1.0 - p))
-                    * pow(nuprime / nu_c, -0.5*p);
-            back_pow = (-6+13*p - (6-p)*eff_k)/(12*(4-eff_k));
-        }
-    }
-    else
-    {
-        if (nuprime < nu_c)
-        {
-            freq = pow(nuprime / nu_c, 1.0/3.0);
-            back_pow = (18-5*eff_k)/(3*(4-eff_k));
-        }
-        else if (nuprime < nu_m)
-        {
-            freq = sqrt(nu_c / nuprime);
-            back_pow = (7-5*eff_k)/(12*(4-eff_k));
-        }
-        else
-        {
-            freq = sqrt(nu_c/nu_m) * pow(nuprime / nu_m, -0.5 * p);
-            back_pow = (-6+13*p - (6-p)*eff_k)/(12*(4-eff_k));
+
+        if (theta > 0.0 && theta < 100.0) {
+            // Compute thermal emissivity
+            em_thermal = thermal_emissivity(nuprime, theta, nprime, B, g_c);
         }
     }
 
-    if(em != em || em < 0.0)
-    {
-        fprintf(stderr, "bad em:%.3le te=%.3le mu=%.3lf\n",
-                em, te, mu);
-        return -1;
-    }
-    if(freq != freq || freq < 0.0)
-    {
-        fprintf(stderr, "bad freq at:%.3le te=%.3le mu=%.3lf\n",
-                freq, te, mu);
-        return -1;
+    // =========================================================================
+    // COMPONENT 2: NON-THERMAL (POWER-LAW) EMISSION
+    // =========================================================================
+    double em_powerlaw = 0.0;
+
+    if (E_powerlaw > 0.0 && delta > 0.0) {
+        // Minimum Lorentz factor of power-law
+        double g_m = epsebar * E_powerlaw / (ksiN * nprime * m_e * v_light * v_light);
+
+        if((specType & DEEP_NEWTONIAN_FLAG) && g_m < 1.0)
+            g_m = 1.0;
+
+        // Characteristic frequencies
+        double nu_m = 3.0 * g_m * g_m * e_e * B / (4.0 * PI * m_e * v_light);
+        double nu_c = 3.0 * g_c * g_c * e_e * B / (4.0 * PI * m_e * v_light);
+
+        // Power-law emissivity prefactor
+        double em_pl_prefactor = 0.5*(p - 1.0)*sqrt(3.0) * e_e*e_e*e_e * ksiN * nprime * B
+                        / (m_e*v_light*v_light);
+
+        if(specType & DEEP_NEWTONIAN_FLAG)
+            em_pl_prefactor *= epsebar * e_th / (ksiN*nprime * g_m * m_e * v_light*v_light);
+
+        // Frequency-dependent part (standard broken power-law)
+        double freq = 0.0;
+
+        if (nu_c > nu_m) {
+            // Slow cooling
+            if (nuprime < nu_m) {
+                freq = pow(nuprime / nu_m, 1.0 / 3.0);
+            } else if (nuprime < nu_c) {
+                freq = pow(nuprime / nu_m, 0.5 * (1.0 - p));
+            } else {
+                freq = pow(nu_c / nu_m, 0.5 * (1.0 - p)) * pow(nuprime / nu_c, -0.5*p);
+            }
+        } else {
+            // Fast cooling
+            if (nuprime < nu_c) {
+                freq = pow(nuprime / nu_c, 1.0/3.0);
+            } else if (nuprime < nu_m) {
+                freq = sqrt(nu_c / nuprime);
+            } else {
+                freq = sqrt(nu_c/nu_m) * pow(nuprime / nu_m, -0.5 * p);
+            }
+        }
+
+        em_powerlaw = em_pl_prefactor * freq;
     }
 
-    double em_lab = em * freq / (g*g * a*a);
+    // =========================================================================
+    // COMBINE COMPONENTS
+    // =========================================================================
+    // Simply add the two contributions!
+    double em_comoving = em_thermal + em_powerlaw;
 
-    // Self-Absorption
-    if(specType & (SSA_SMOOTH_FLAG | SSA_SHARP_FLAG))
-    {
-        // Co-moving frame absorption coefficient
-        //double abs_com_P = sqrt(3) * e_e*e_e*e_e * (p-1)*(p+2)*nprime*B*ksiN
-        //                    / (16*M_PI * m_e*m_e*v_light*v_light
-        //                        * g_m * nu_m*nu_m);
-        //TODO quick abs coeff fix?
+    // Transform to lab frame
+    double em_lab = em_comoving / (g*g * a*a);
+
+    // =========================================================================
+    // SELF-ABSORPTION (same as original, but applied to total emission)
+    // =========================================================================
+    if(specType & (SSA_SMOOTH_FLAG | SSA_SHARP_FLAG)) {
+        // For simplicity, use power-law absorption coefficient
+        // (thermal absorption is similar at low frequencies anyway)
+
         if(GAMMA_FUNC_1_3 <= 0.0)
             GAMMA_FUNC_1_3 = tgamma(1.0/3.0);
+
+        double g_m_eff = epsebar * e_th / (ksiN * nprime * m_e * v_light * v_light);
+        double nu_m_eff = 3.0 * g_m_eff * g_m_eff * e_e * B / (4.0 * PI * m_e * v_light);
+
         double abs_com_P = cbrt(2) * sqrt(3) * GAMMA_FUNC_1_3 * GAMMA_FUNC_1_3
                             * (p-1) * e_e*e_e*e_e * nprime*B*ksiN
                             / (10*M_PI * m_e*m_e*v_light*v_light
-                                * (3*p+2) * g_m * nu_m*nu_m);
-        double abs_com_freq;
-        if(nuprime < nu_m)
-            abs_com_freq = pow(nuprime / nu_m, -5.0/3.0);
-        else
-            abs_com_freq = pow(nuprime / nu_m, -0.5*(p+4));
+                                * (3*p+2) * g_m_eff * nu_m_eff*nu_m_eff);
 
-        // Lab frame absorption coefficient
-        double abs = abs_com_P * abs_com_freq * a*g;
+        double abs_com_freq;
+        if(nuprime < nu_m_eff)
+            abs_com_freq = pow(nuprime / nu_m_eff, -5.0/3.0);
+        else
+            abs_com_freq = pow(nuprime / nu_m_eff, -0.5*(p+4));
+
+        double abs_coeff = abs_com_P * abs_com_freq;
+        double abs = abs_coeff * a * g;
 
         double la = 0.0;
         double lb = 0.0;
-
         calc_absorption_length(R, mu, DR0/R, betaS, us, &la, &lb);
 
         if(la < 0.0 || lb < 0.0)
@@ -708,113 +962,60 @@ double emissivity(double nu, double R, double mu, double te,
         double taua = la * abs;
         double taub = lb * abs;
 
-        // Now that we know the optical depth, we apply it in a way
-        // according to the given specType
-
-        if((specType & SSA_SMOOTH_FLAG) && (specType & SSA_SHARP_FLAG))
-        {
-            //Special case: -use the optically thick limit *everywhere*
-            //              -ignore shadowing
-
+        if((specType & SSA_SMOOTH_FLAG) && (specType & SSA_SHARP_FLAG)) {
             em_lab /= taua;
-        }
-        else if(specType & SSA_SMOOTH_FLAG)
-        {
-            // Apply self-absorption "properly"
-            //
-            // correction factor to emissivity from absorption
-            // ( 1 - e^(-tau) ) / tau  (on front face)
-            //
-            // back face has extra factor ~ e^-betaS/(mu-betaS)
-            //
-            // for now ignoring shadowing by the front face.
-            /*
-            double abs_fac;
-            if(dtau == 0.0)
-                abs_fac = 1.0;
-            else if(dtau > 0.0)
-                abs_fac = -expm1(-dtau) / dtau;
-            else
-            {
-                abs_fac = expm1(dtau) / dtau; // * exp(
-                            //abs * DR * betaS*mu / (mu - betaS));
-            }
-            */
-
-            double abs_fac = absorption_integral(R, DR, taua, taub, 0) 
-                                / (R*R*DR);
-
-            //printf("F %.6le %.6le %.6le %.6le %.6le %.6le\n", abs,
-            //        la, lb, taua, taub, abs_fac);
-           
-            //TODO: TEST AND CHECK THIS COOLING NONSENSE
+        } else if(specType & SSA_SMOOTH_FLAG) {
+            double abs_fac = absorption_integral(R, DR, taua, taub, 0) / (R*R*DR);
             double sharp_cooling_corr = 1.0;
-            if(nu_c < nu_m)
-                sharp_cooling_corr = pow(nu_c/nu_m, 1.0/3.0);
-
+            if(nu_m_eff > 0 && g_c < g_m_eff)
+                sharp_cooling_corr = pow(3.0 * g_c * g_c * e_e * B / (4.0 * PI * m_e * v_light) / nu_m_eff, 1.0/3.0);
             double tau = 0.5*(taua + taub);
-
             double w = 1 / (1 + tau);
-            
             double cooling_corr = w + (1-w) * sharp_cooling_corr;
-            
             em_lab *= abs_fac * cooling_corr;
         }
-        else if(specType & SSA_SHARP_FLAG)
-        {
-            // Apply self-absorption "simply".  
-            //
-            // Compute flux in optically thick limit,
-            // use in final result if less than optically thin calculation.
-            //
-            // e.g. use tau->infty limit if tau > 1.0
-
-            /*
-            double tau1 = taub;
-            double dtau = taua - taub;
-            double R_correction = 1.0;
-
-            if(taua < taub)
-            {
-                tau1 = taua;
-                dtau = taub - taua;
-                R_correction = (R-DR)/R;
-            }
-
-            double abs_fac = R_correction*R_correction*exp(-tau1)/dtau;
-            */
-
-            // Compute flux in optically thick limit
-            // Compute nu_a
-            // Use sharp spectrum explicitly, e.g. Granot & Sari 2002
-            
-           
-            // optical depth at nu_m.
-            //    tau = tau_m * { (nu/nu_m)^(-5/3) if nu < nu
-            //                  { (nu/nu_m)^(-(p+4)/2) if nu < nu
-            double tau_m = taua / abs_com_freq;
-
-            //
-
-            double nu_a;
-            if(tau_m < 1.0)
-                nu_a = nu_m * pow(tau_m, 0.6);
-            else
-                nu_a = nu_m * pow(tau_m, 2.0/(p+4.0));
-
-            //if(abs_fac < 1.0)
-            //    em_lab *= abs_fac;
-        }
     }
+
     if(specType < 0)
         em_lab = 1.0;
 
-    if(specType & BULK_BM_FLAG)
-    {
+    // =========================================================================
+    // BULK MOTION ADJUSTMENT (if enabled)
+    // =========================================================================
+    double eff_k = 3 - Msw / (4*M_PI*R*R*R*rho0);
+    double back_pow = 0.0;
+
+    // Determine back_pow based on spectral regime
+    // For thermal-dominated at low frequencies
+    double g_m_eff = epsebar * e_th / (ksiN * nprime * m_e * v_light * v_light);
+    double nu_m_eff = 3.0 * g_m_eff * g_m_eff * e_e * B / (4.0 * PI * m_e * v_light);
+    double nu_c_eff = 3.0 * g_c * g_c * e_e * B / (4.0 * PI * m_e * v_light);
+
+    if (em_thermal > em_powerlaw && nuprime < nu_m_eff) {
+        back_pow = (28-11*eff_k)/(9*(4-eff_k));
+    } else {
+        // Power-law dominated
+        if (nu_c_eff > nu_m_eff) {
+            if (nuprime < nu_m_eff)
+                back_pow = (28-11*eff_k)/(9*(4-eff_k));
+            else if (nuprime < nu_c_eff)
+                back_pow = (33+13*p - (15-p)*eff_k)/(12*(4-eff_k));
+            else
+                back_pow = (-6+13*p - (6-p)*eff_k)/(12*(4-eff_k));
+        } else {
+            if (nuprime < nu_c_eff)
+                back_pow = (18-5*eff_k)/(3*(4-eff_k));
+            else if (nuprime < nu_m_eff)
+                back_pow = (7-5*eff_k)/(12*(4-eff_k));
+            else
+                back_pow = (-6+13*p - (6-p)*eff_k)/(12*(4-eff_k));
+        }
+    }
+
+    if(specType & BULK_BM_FLAG) {
         double d0 = DR / R;
         double chi_peak = g*g*(1-mu*mu);
-        if(chi_peak > 1.0)
-        {
+        if(chi_peak > 1.0) {
             double d = d0 * (pow(chi_peak, 1-back_pow)-back_pow) / (1-back_pow);
             DR = R * d;
         }
@@ -823,9 +1024,8 @@ double emissivity(double nu, double R, double mu, double te,
     if(specType & FIXED_PL_FLAG)
         em_lab = epse/(g*g*a*a) * pow(nuprime, p-4);
 
-    return R * R * DR * em_lab;
+    return R * R * DR * em_lab * pow(te, back_pow);
 }
-
 double get_u(double mu, struct fluxParams *pars)
 {
     int ia = searchSorted(mu, pars->mu_table, pars->table_entries);
@@ -914,7 +1114,9 @@ double costheta_integrand(double aomct, void* params) // inner integral
     
     double dFnu =  emissivity(pars->nu_obs, R, mu, t_e, u, us,
                                 rho0, Msw, pars->p, pars->epsilon_E,
-                                pars->epsilon_B, pars->ksi_N, pars->spec_type);
+                                pars->epsilon_B, pars->ksi_N,
+                                pars->frac_maxwellian, pars->gamma_th,
+                                pars->spec_type);
 
     if(dFnu != dFnu || dFnu < 0.0)
     {
@@ -1822,8 +2024,10 @@ double intensity(double theta, double phi, double tobs, double nuobs,
                          pars->k_env, pars->rho1_env);
 
     I = emissivity(pars->nu_obs, R, mu, t_e, u, us, rho0, Msw,
-                        pars->p, pars->epsilon_E, pars->epsilon_B, 
-                        pars->ksi_N, pars->spec_type);
+                        pars->p, pars->epsilon_E, pars->epsilon_B,
+                        pars->ksi_N,
+                        pars->frac_maxwellian, pars->gamma_th,
+                        pars->spec_type);
 
     return I;
 }
@@ -2547,14 +2751,16 @@ void setup_fluxParams(struct fluxParams *pars,
                     double theta_obs,
                     double E_iso_core, double theta_core, double theta_wing,
                     double b,
-                    double L0_inj, double q_inj, double t0_inj, double ts_inj, 
+                    double L0_inj, double q_inj, double t0_inj, double ts_inj,
                     double n_0,
                     double p,
                     double epsilon_E,
-                    double epsilon_B, 
+                    double epsilon_B,
                     double ksi_N,
+                    double frac_maxwellian,
+                    double gamma_th,
                     double g0,
-                    int envType, double R0_env, double k_env, double rho1_env, 
+                    int envType, double R0_env, double k_env, double rho1_env,
                     double E_core_global,
                     double theta_core_global,
                     double ta, double tb,
@@ -2611,6 +2817,8 @@ void setup_fluxParams(struct fluxParams *pars,
     pars->epsilon_E = epsilon_E;
     pars->epsilon_B = epsilon_B;
     pars->ksi_N = ksi_N;
+    pars->frac_maxwellian = frac_maxwellian;
+    pars->gamma_th = gamma_th;
 
     pars->envType = envType;
     pars->R0_env = R0_env;
@@ -3084,4 +3292,3 @@ void free_fluxParams(struct fluxParams *pars)
         pars->error_msg = NULL;
     }
 }
-

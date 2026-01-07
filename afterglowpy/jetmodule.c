@@ -25,7 +25,9 @@ static const double n_0_default = 1.0;
 static const double p_default = 2.2;
 static const double epsilon_E_default = 0.1;
 static const double epsilon_B_default = 0.01;
-static const double ksi_N_default = 1.0; 
+static const double ksi_N_default = 1.0;
+static const double frac_maxwellian_default = 0.0;  // Pure power-law by default
+static const double gamma_th_default = 1.0;
 static const double d_L_default = 1.0e27;
 
 static const int latRes_default = 5;
@@ -219,7 +221,7 @@ static PyObject *error_out(PyObject *m)
     return NULL;
 }
 
-static PyObject *jet_fluxDensity(PyObject *self, PyObject *args, 
+static PyObject *jet_fluxDensity(PyObject *self, PyObject *args,
                                     PyObject *kwargs)
 {
     PyObject *t_obj = NULL;
@@ -245,13 +247,15 @@ static PyObject *jet_fluxDensity(PyObject *self, PyObject *args,
     double b = b_default;
     double L0_inj = L0_inj_default;
     double q_inj = q_inj_default;
-    double t0_inj = t0_inj_default; 
-    double ts_inj = ts_inj_default; 
+    double t0_inj = t0_inj_default;
+    double ts_inj = ts_inj_default;
     double n_0 = n_0_default;
     double p = p_default;
     double epsilon_E = epsilon_E_default;
     double epsilon_B = epsilon_B_default;
-    double ksi_N = ksi_N_default; 
+    double ksi_N = ksi_N_default;
+    double frac_maxwellian = frac_maxwellian_default;
+    double gamma_th = gamma_th_default;
     double d_L = d_L_default;
 
     int latRes = latRes_default;
@@ -282,7 +286,9 @@ static PyObject *jet_fluxDensity(PyObject *self, PyObject *args,
                                     "b",
                                     "L0", "q", "ts",
                                     "n0", "p",
-                                    "epsilon_e", "epsilon_B", "xi_N", "d_L",
+                                    "epsilon_e", "epsilon_B", "xi_N",
+                                    "frac_maxwellian", "gamma_th",
+                                    "d_L",
                                     "g0",
                                 "envType", "R0Env", "kEnv", "rho1Env",
                                 "t0_inj",
@@ -296,13 +302,15 @@ static PyObject *jet_fluxDensity(PyObject *self, PyObject *args,
     //printf("About to parse args\n");
     //Parse Arguments
     if(!PyArg_ParseTupleAndKeywords(args, kwargs,
-                "OO|ii""ddddddddddddddd""iddd""d""dd""iiidddii""O""iii""O",
+                "OO|ii""dddddddddddddddddd""iddd""d""dd""iiidddii""O""iii""O",
                 kwlist,
                 &t_obj, &nu_obj,
                 &jet_type, &spec_type,
                 &theta_obs, &E_iso_core, &theta_h_core, &theta_h_wing, &b,
                     &L0_inj, &q_inj, &ts_inj,
-                    &n_0, &p, &epsilon_E, &epsilon_B, &ksi_N, &d_L,
+                    &n_0, &p, &epsilon_E, &epsilon_B, &ksi_N,
+                    &frac_maxwellian, &gamma_th,
+                    &d_L,
                     &g0,
                 &envType, &R0_env, &k_env, &rho1_env,
                 &t0_inj,
@@ -471,7 +479,9 @@ static PyObject *jet_fluxDensity(PyObject *self, PyObject *args,
     setup_fluxParams(&fp, d_L, theta_obs, E_iso_core, theta_h_core,
                         theta_h_wing, b,
                         L0_inj, q_inj, t0_inj, ts_inj,
-                        n_0, p, epsilon_E, epsilon_B, ksi_N, g0, 
+                        n_0, p, epsilon_E, epsilon_B, ksi_N,
+                        frac_maxwellian, gamma_th,
+                        g0,
                         envType, R0_env, k_env, rho1_env,
                         E_core_global, theta_h_core_global, ta, tb,
                         tRes, latRes, int_type,
@@ -543,24 +553,26 @@ static PyObject *jet_emissivity(PyObject *self, PyObject *args)
 {
     int spec_type = 0;
     double nu, R, mu, te, u, us, rho0, Msw, p, epse, epsB, xi_N;
+    double frac_maxwellian = frac_maxwellian_default;
+    double gamma_th = gamma_th_default;
 
 
     //Parse Arguments
-    if(!PyArg_ParseTuple(args, "dddddddddddd|i", &nu, &R, &mu, &te,
+    if(!PyArg_ParseTuple(args, "dddddddddddd|idd", &nu, &R, &mu, &te,
                             &u, &us, &rho0, &Msw, &p, &epse, &epsB, &xi_N,
-                            &spec_type))
+                            &spec_type, &frac_maxwellian, &gamma_th))
     {
         //PyErr_SetString(PyExc_RuntimeError, "Could not parse arguments.");
         return NULL;
     }
 
     // Calculate it!
-    double em = emissivity(nu, R, mu, te, u, us, rho0, Msw, p, epse, epsB, 
-                           xi_N, spec_type);
+    double em = emissivity(nu, R, mu, te, u, us, rho0, Msw, p, epse, epsB,
+                           xi_N, frac_maxwellian, gamma_th, spec_type);
 
     //Build output
     PyObject *ret = Py_BuildValue("d", em);
-    
+
     return ret;
 }
 
@@ -582,18 +594,20 @@ static PyObject *jet_intensity(PyObject *self, PyObject *args, PyObject *kwargs)
     double L0_inj = L0_inj_default;
     double q_inj = q_inj_default;
     double t0_inj = t0_inj_default; 
-    double ts_inj = ts_inj_default; 
+    double ts_inj = ts_inj_default;
     double n_0 = n_0_default;
     double p = p_default;
     double epsilon_E = epsilon_E_default;
     double epsilon_B = epsilon_B_default;
-    double ksi_N = ksi_N_default; 
+    double ksi_N = ksi_N_default;
+    double frac_maxwellian = frac_maxwellian_default;
+    double gamma_th = gamma_th_default;
     double d_L = d_L_default;
 
     int latRes = latRes_default;
     int tRes = tRes_default;
     double g0 = g0_default;
-    
+
     int envType = envType_default;
     double R0_env = R0_env_default;
     double k_env = k_env_default;
@@ -780,7 +794,9 @@ static PyObject *jet_intensity(PyObject *self, PyObject *args, PyObject *kwargs)
     setup_fluxParams(&fp, d_L, theta_obs, E_iso_core, theta_h_core,
                         theta_h_wing, b,
                         L0_inj, q_inj, t0_inj, ts_inj,
-                        n_0, p, epsilon_E, epsilon_B, ksi_N, g0, 
+                        n_0, p, epsilon_E, epsilon_B, ksi_N,
+                        frac_maxwellian, gamma_th,
+                        g0,
                         envType, R0_env, k_env, rho1_env,
                         E_core_global, theta_h_core_global, ta, tb,
                         tRes, latRes, int_type,
@@ -837,7 +853,9 @@ static PyObject *jet_shockVals(PyObject *self, PyObject *args, PyObject *kwargs)
     double p = p_default;
     double epsilon_E = epsilon_E_default;
     double epsilon_B = epsilon_B_default;
-    double ksi_N = ksi_N_default; 
+    double ksi_N = ksi_N_default;
+    double frac_maxwellian = frac_maxwellian_default;
+    double gamma_th = gamma_th_default;
     double d_L = d_L_default;
 
     int latRes = latRes_default;
@@ -1027,7 +1045,9 @@ static PyObject *jet_shockVals(PyObject *self, PyObject *args, PyObject *kwargs)
     setup_fluxParams(&fp, d_L, theta_obs, E_iso_core, theta_h_core,
                         theta_h_wing, b,
                         L0_inj, q_inj, t0_inj, ts_inj,
-                        n_0, p, epsilon_E, epsilon_B, ksi_N, g0, 
+                        n_0, p, epsilon_E, epsilon_B, ksi_N,
+                        frac_maxwellian, gamma_th,
+                        g0,
                         envType, R0_env, k_env, rho1_env,
                         E_core_global, theta_h_core_global, ta, tb,
                         tRes, latRes, int_type,

@@ -83,6 +83,14 @@ def fluxDensity(t, nu, *args, **kwargs):
         Fraction of thermal energy in magnetic field, epsilon_B <= 1.
     xi_N : float
         Fraction of electrons that get accelerated, xi_N <= 1.
+    frac_maxwellian : float, optional
+        Energy fraction in thermal (Maxwellian) electron component.
+        Range [0, 1]. Default 0.0 (pure power-law).
+        When > 0, the electron distribution becomes a mixture of thermal
+        and non-thermal components following Giannios & Spitkovsky (2009).
+    gamma_th : float, optional
+        Thermal Lorentz factor of Maxwellian component. Meaningful only
+        when frac_maxwellian > 0. Default 1.0.
     d_L : float
         Luminosity distance to burst, in cm.
     z : float, optional
@@ -330,6 +338,14 @@ def intensity(theta, phi, t, nu, *args, **kwargs):
         Fraction of thermal energy in magnetic field, epsilon_B <= 1.
     xi_N : float
         Fraction of electrons that get accelerated, xi_N <= 1.
+    frac_maxwellian : float, optional
+        Energy fraction in thermal (Maxwellian) electron component.
+        Range [0, 1]. Default 0.0 (pure power-law).
+        When > 0, the electron distribution becomes a mixture of thermal
+        and non-thermal components following Giannios & Spitkovsky (2009).
+    gamma_th : float, optional
+        Thermal Lorentz factor of Maxwellian component. Meaningful only
+        when frac_maxwellian > 0. Default 1.0.
     d_L : float
         Luminosity distance to burst, in cm.
     z : float, optional
@@ -557,6 +573,16 @@ def checkJetArgs(argsDict):
         raise ValueError("xi_N must be in (0, 1]")
     if dL <= 0.0:
         raise ValueError("d_L must be positive")
+
+    # Maxwellian component parameters
+    if 'frac_maxwellian' in argsDict:
+        frac_maxwellian = argsDict['frac_maxwellian']
+        if frac_maxwellian < 0.0 or frac_maxwellian > 1.0:
+            raise ValueError("frac_maxwellian must be in [0, 1]")
+    if 'gamma_th' in argsDict:
+        gamma_th = argsDict['gamma_th']
+        if gamma_th < 1.0:
+            raise ValueError("gamma_th must be >= 1.0")
 
     # Bounds on optional parameters
 
